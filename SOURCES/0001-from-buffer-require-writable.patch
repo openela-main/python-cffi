@@ -1,0 +1,238 @@
+From c5c4d32c3e3ec0fbaabc4b9890fd17c9c58407d2 Mon Sep 17 00:00:00 2001
+From: Armin Rigo <arigo@tunes.org>
+Date: Sun, 16 Dec 2018 08:48:45 +0100
+Subject: [PATCH] Issue #394
+
+Implement ffi.from_buffer(x, require_writable=True)
+---
+ c/_cffi_backend.c                 | 11 +++++++----
+ c/ffi_obj.c                       | 13 ++++++++++---
+ c/test_c.py                       | 12 ++++++++++++
+ cffi/api.py                       |  5 +++--
+ doc/source/ref.rst                | 15 ++++++++++++++-
+ doc/source/whatsnew.rst           |  4 ++++
+ testing/cffi0/test_ffi_backend.py | 10 ++++++++++
+ testing/cffi1/test_ffi_obj.py     | 10 ++++++++++
+ testing/cffi1/test_new_ffi_1.py   | 10 ++++++++++
+ 9 files changed, 80 insertions(+), 10 deletions(-)
+
+diff --git a/c/_cffi_backend.c b/c/_cffi_backend.c
+index dc13c618..c6190e73 100644
+--- a/c/_cffi_backend.c
++++ b/c/_cffi_backend.c
+@@ -6741,7 +6741,8 @@ static int _my_PyObject_GetContiguousBuffer(PyObject *x, Py_buffer *view,
+     return 0;
+ }
+ 
+-static PyObject *direct_from_buffer(CTypeDescrObject *ct, PyObject *x)
++static PyObject *direct_from_buffer(CTypeDescrObject *ct, PyObject *x,
++                                    int require_writable)
+ {
+     CDataObject *cd;
+     Py_buffer *view;
+@@ -6761,7 +6762,7 @@ static PyObject *direct_from_buffer(CTypeDescrObject *ct, PyObject *x)
+         PyErr_NoMemory();
+         return NULL;
+     }
+-    if (_my_PyObject_GetContiguousBuffer(x, view, 0) < 0)
++    if (_my_PyObject_GetContiguousBuffer(x, view, require_writable) < 0)
+         goto error1;
+ 
+     cd = (CDataObject *)PyObject_GC_New(CDataObject_owngc_frombuf,
+@@ -6789,15 +6790,17 @@ static PyObject *b_from_buffer(PyObject *self, PyObject *args)
+ {
+     CTypeDescrObject *ct;
+     PyObject *x;
++    int require_writable = 0;
+ 
+-    if (!PyArg_ParseTuple(args, "O!O", &CTypeDescr_Type, &ct, &x))
++    if (!PyArg_ParseTuple(args, "O!O|i", &CTypeDescr_Type, &ct, &x,
++                          &require_writable))
+         return NULL;
+ 
+     if (!(ct->ct_flags & CT_IS_UNSIZED_CHAR_A)) {
+         PyErr_Format(PyExc_TypeError, "needs 'char[]', got '%s'", ct->ct_name);
+         return NULL;
+     }
+-    return direct_from_buffer(ct, x);
++    return direct_from_buffer(ct, x, require_writable);
+ }
+ 
+ static int _fetch_as_buffer(PyObject *x, Py_buffer *view, int writable_only)
+diff --git a/c/ffi_obj.c b/c/ffi_obj.c
+index 9e674660..cc5c7150 100644
+--- a/c/ffi_obj.c
++++ b/c/ffi_obj.c
+@@ -697,9 +697,16 @@ PyDoc_STRVAR(ffi_from_buffer_doc,
+ "containing large quantities of raw data in some other format, like\n"
+ "'array.array' or numpy arrays.");
+ 
+-static PyObject *ffi_from_buffer(PyObject *self, PyObject *arg)
++static PyObject *ffi_from_buffer(PyObject *self, PyObject *args, PyObject *kwds)
+ {
+-    return direct_from_buffer(g_ct_chararray, arg);
++    PyObject *arg;
++    int require_writable = 0;
++    static char *keywords[] = {"python_buffer", "require_writable", NULL};
++
++    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O|i:from_buffer", keywords,
++                                     &arg, &require_writable))
++        return NULL;
++    return direct_from_buffer(g_ct_chararray, arg, require_writable);
+ }
+ 
+ PyDoc_STRVAR(ffi_gc_doc,
+@@ -1072,7 +1079,7 @@ static PyMethodDef ffi_methods[] = {
+  {"cast",       (PyCFunction)ffi_cast,       METH_VARARGS, ffi_cast_doc},
+  {"dlclose",    (PyCFunction)ffi_dlclose,    METH_VARARGS, ffi_dlclose_doc},
+  {"dlopen",     (PyCFunction)ffi_dlopen,     METH_VARARGS, ffi_dlopen_doc},
+- {"from_buffer",(PyCFunction)ffi_from_buffer,METH_O,       ffi_from_buffer_doc},
++ {"from_buffer",(PyCFunction)ffi_from_buffer,METH_VKW,     ffi_from_buffer_doc},
+  {"from_handle",(PyCFunction)ffi_from_handle,METH_O,       ffi_from_handle_doc},
+  {"gc",         (PyCFunction)ffi_gc,         METH_VKW,     ffi_gc_doc},
+  {"getctype",   (PyCFunction)ffi_getctype,   METH_VKW,     ffi_getctype_doc},
+diff --git a/c/test_c.py b/c/test_c.py
+index b83c0aa8..b6bb752d 100644
+--- a/c/test_c.py
++++ b/c/test_c.py
+@@ -3741,6 +3741,18 @@ def test_from_buffer_more_cases():
+     check(4 | 8,  "CHB", "GTB")
+     check(4 | 16, "CHB", "ROB")
+ 
++def test_from_buffer_require_writable():
++    BChar = new_primitive_type("char")
++    BCharP = new_pointer_type(BChar)
++    BCharA = new_array_type(BCharP, None)
++    p1 = from_buffer(BCharA, b"foo", False)
++    assert p1 == from_buffer(BCharA, b"foo", False)
++    py.test.raises((TypeError, BufferError), from_buffer, BCharA, b"foo", True)
++    ba = bytearray(b"foo")
++    p1 = from_buffer(BCharA, ba, True)
++    p1[0] = b"g"
++    assert ba == b"goo"
++
+ def test_memmove():
+     Short = new_primitive_type("short")
+     ShortA = new_array_type(new_pointer_type(Short), None)
+diff --git a/cffi/api.py b/cffi/api.py
+index 4ea08bb4..63468d06 100644
+--- a/cffi/api.py
++++ b/cffi/api.py
+@@ -341,7 +341,7 @@ class FFI(object):
+    #    """
+    #    note that 'buffer' is a type, set on this instance by __init__
+ 
+-    def from_buffer(self, python_buffer):
++    def from_buffer(self, python_buffer, require_writable=False):
+         """Return a <cdata 'char[]'> that points to the data of the
+         given Python object, which must support the buffer interface.
+         Note that this is not meant to be used on the built-in types
+@@ -349,7 +349,8 @@ class FFI(object):
+         but only on objects containing large quantities of raw data
+         in some other format, like 'array.array' or numpy arrays.
+         """
+-        return self._backend.from_buffer(self.BCharA, python_buffer)
++        return self._backend.from_buffer(self.BCharA, python_buffer,
++                                         require_writable)
+ 
+     def memmove(self, dest, src, n):
+         """ffi.memmove(dest, src, n) copies n bytes of memory from src to dest.
+diff --git a/doc/source/ref.rst b/doc/source/ref.rst
+index 23ea733a..04c0eedd 100644
+--- a/doc/source/ref.rst
++++ b/doc/source/ref.rst
+@@ -188,7 +188,8 @@ byte strings).  Use ``buf[:]`` instead.
+ *New in version 1.10:* ``ffi.buffer`` is now the type of the returned
+ buffer objects; ``ffi.buffer()`` actually calls the constructor.
+ 
+-**ffi.from_buffer(python_buffer)**: return a ``<cdata 'char[]'>`` that
++**ffi.from_buffer(python_buffer, require_writable=False)**:
++return a ``<cdata 'char[]'>`` that
+ points to the data of the given Python object, which must support the
+ buffer interface.  This is the opposite of ``ffi.buffer()``.  It gives
+ a reference to the existing data, not a copy.
+@@ -216,6 +217,18 @@ bytearray objects were supported in version 1.7 onwards (careful, if you
+ resize the bytearray, the ``<cdata>`` object will point to freed
+ memory); and byte strings were supported in version 1.8 onwards.
+ 
++*New in version 1.12:* added the ``require_writable`` argument.  If set to
++True, the function fails if the buffer obtained from ``python_buffer`` is
++read-only (e.g. if ``python_buffer`` is a byte string).  The exact exception is
++raised by the object itself, and for things like bytes it varies with the
++Python version, so don't rely on it.  (Before version 1.12, the same effect can
++be achieved with a hack: call ``ffi.memmove(python_buffer, b"", 0)``.  This has
++no effect if the object is writable, but fails if it is read-only.)
++
++Please keep in mind that CFFI does not implement the C keyword ``const``: even
++if you set ``require_writable`` to False explicitly, you still get a regular
++read-write cdata pointer.
++
+ 
+ ffi.memmove()
+ +++++++++++++
+diff --git a/testing/cffi0/test_ffi_backend.py b/testing/cffi0/test_ffi_backend.py
+index 362a50a5..e465c2d2 100644
+--- a/testing/cffi0/test_ffi_backend.py
++++ b/testing/cffi0/test_ffi_backend.py
+@@ -326,6 +326,16 @@ class TestBitfield:
+         assert ffi.typeof(c) is ffi.typeof("char[]")
+         ffi.cast("unsigned short *", c)[1] += 500
+         assert list(a) == [10000, 20500, 30000]
++        assert c == ffi.from_buffer(a, True)
++        assert c == ffi.from_buffer(a, require_writable=True)
++        #
++        p = ffi.from_buffer(b"abcd")
++        assert p[2] == b"c"
++        #
++        assert p == ffi.from_buffer(b"abcd", False)
++        py.test.raises((TypeError, BufferError), ffi.from_buffer, b"abcd", True)
++        py.test.raises((TypeError, BufferError), ffi.from_buffer, b"abcd",
++                                                 require_writable=True)
+ 
+     def test_memmove(self):
+         ffi = FFI()
+diff --git a/testing/cffi1/test_ffi_obj.py b/testing/cffi1/test_ffi_obj.py
+index 2b5d764e..4222740e 100644
+--- a/testing/cffi1/test_ffi_obj.py
++++ b/testing/cffi1/test_ffi_obj.py
+@@ -243,6 +243,16 @@ def test_ffi_from_buffer():
+     assert ffi.typeof(c) is ffi.typeof("char[]")
+     ffi.cast("unsigned short *", c)[1] += 500
+     assert list(a) == [10000, 20500, 30000]
++    assert c == ffi.from_buffer(a, True)
++    assert c == ffi.from_buffer(a, require_writable=True)
++    #
++    p = ffi.from_buffer(b"abcd")
++    assert p[2] == b"c"
++    #
++    assert p == ffi.from_buffer(b"abcd", False)
++    py.test.raises((TypeError, BufferError), ffi.from_buffer, b"abcd", True)
++    py.test.raises((TypeError, BufferError), ffi.from_buffer, b"abcd",
++                                             require_writable=True)
+ 
+ def test_memmove():
+     ffi = _cffi1_backend.FFI()
+diff --git a/testing/cffi1/test_new_ffi_1.py b/testing/cffi1/test_new_ffi_1.py
+index 2c93db2f..f89769d6 100644
+--- a/testing/cffi1/test_new_ffi_1.py
++++ b/testing/cffi1/test_new_ffi_1.py
+@@ -1653,6 +1653,16 @@ class TestNewFFI1:
+         assert ffi.typeof(c) is ffi.typeof("char[]")
+         ffi.cast("unsigned short *", c)[1] += 500
+         assert list(a) == [10000, 20500, 30000]
++        assert c == ffi.from_buffer(a, True)
++        assert c == ffi.from_buffer(a, require_writable=True)
++        #
++        p = ffi.from_buffer(b"abcd")
++        assert p[2] == b"c"
++        #
++        assert p == ffi.from_buffer(b"abcd", False)
++        py.test.raises((TypeError, BufferError), ffi.from_buffer, b"abcd", True)
++        py.test.raises((TypeError, BufferError), ffi.from_buffer, b"abcd",
++                                                 require_writable=True)
+ 
+     def test_all_primitives(self):
+         assert set(PRIMITIVE_TO_INDEX) == set([
+-- 
+GitLab
+

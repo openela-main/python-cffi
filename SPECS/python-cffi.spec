@@ -1,10 +1,12 @@
 Name:           python-cffi
 Version:        1.11.5
-Release:        5%{?dist}
+Release:        6%{?dist}
 Summary:        Foreign Function Interface for Python to call C code
 License:        MIT
 URL:            http://cffi.readthedocs.org/
 Source0:        https://pypi.io/packages/source/c/cffi/cffi-%{version}.tar.gz
+
+Patch0001:      0001-from-buffer-require-writable.patch
 
 BuildRequires:  libffi-devel
 BuildRequires:  python3-sphinx
@@ -16,7 +18,7 @@ BuildRequires:  python3-pytest
 
 # Do not check .so files in the python_sitelib directory
 # or any files in the application's directory for provides
-%global __provides_exclude_from ^(%{python_sitearch}|%{python3_sitearch})/.*\\.so$
+%global __provides_exclude_from ^(%{python3_sitearch})/.*\\.so$
 
 %description
 Foreign Function Interface for Python, providing a convenient and
@@ -41,7 +43,7 @@ Requires:       python3-cffi = %{version}-%{release}
 Documentation for CFFI, the Foreign Function Interface for Python.
 
 %prep
-%setup -q -n cffi-%{version}
+%autosetup -p1 -n cffi-%{version}
 
 %build
 %py3_build
@@ -49,10 +51,9 @@ cd doc
 make html
 rm build/html/.buildinfo
 
-#Tests fail but only in mock.
-#%check
-#%{__python3} setup_base.py build_ext -f -i
-#PYTHONPATH=build/lib.linux-* py.test-3 c/ testing/
+
+%check
+PYTHONPATH=%{buildroot}%{python3_sitearch} %{__python3} -m pytest testing/cffi0 testing/cffi1
 
 %install
 %py3_install \
@@ -68,6 +69,10 @@ rm build/html/.buildinfo
 
 
 %changelog
+* Wed Feb 22 2023 Christian Heimes <cheimes@redhat.com>
+- Backport from_buffer(..., require_writable=True), resolves rhbz#2172416
+- Enable upstream tests
+
 * Mon Oct 22 2018 Christian Heimes <cheimes@redhat.com> - 1.11.5-5
 - Build doc package, resolves rhbz#1641665
 
